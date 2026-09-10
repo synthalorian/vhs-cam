@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black">
+
+    <androidx.camera.view.PreviewView
+        android:id="@+id/previewView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <TextView
+        android:id="@+id/osdTimestamp"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|start"
+        android:layout_marginStart="24dp"
+        android:layout_marginBottom="120dp"
+        android:fontFamily="monospace"
+        android:shadowColor="#ffffff"
+        android:shadowRadius="4"
+        android:textColor="#F5F5F5"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:letterSpacing="0.08"
+        android:text="PLAY \u25B6  SP 0:00:00" />
+
+    <TextView
+        android:id="@+id/osdTopRight"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_margin="24dp"
+        android:fontFamily="monospace"
+        android:shadowColor="#ffffff"
+        android:shadowRadius="4"
+        android:textColor="#F5F5F5"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:text="AUTO" />
+
+    <TextView
+        android:id="@+id/tvRecElapsed"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="24dp"
+        android:fontFamily="monospace"
+        android:shadowColor="#FF0000"
+        android:shadowRadius="6"
+        android:textColor="#FF4040"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:visibility="gone"
+        android:text="\u25CF REC 0:00" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:padding="16dp">
+
+        <Button
+            android:id="@+id/btnPhoto"
+            android:layout_width="0dp"
+            android:layout_height="72dp"
+            android:layout_weight="1"
+            android:layout_marginEnd="8dp"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:text="\uD83D\uDCF7 TAKE PICTURE" />
+
+        <Button
+            android:id="@+id/btnRecord"
+            android:layout_width="0dp"
+            android:layout_height="72dp"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:text="\u25CF RECORD" />
+    </LinearLayout>
+</FrameLayout>
