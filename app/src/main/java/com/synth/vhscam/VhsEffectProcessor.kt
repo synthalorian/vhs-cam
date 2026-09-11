@@ -2,7 +2,6 @@ package com.synth.vhscam
 
 import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
-import android.opengl.GLES30
 import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.EGLContext
@@ -39,7 +38,6 @@ class VhsEffectProcessor : SurfaceProcessor {
     private val glThread = HandlerThread("vhs-gl").apply { start() }
     private val glHandler = Handler(glThread.looper)
     private val glExecutor = Executor { cmd -> glHandler.post(cmd) }
-    private val mainHandler = Handler(android.os.Looper.getMainLooper())
 
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
@@ -56,10 +54,30 @@ class VhsEffectProcessor : SurfaceProcessor {
     private val outputs = LinkedHashMap<SurfaceOutput, EGLSurface>()
 
     private var program = 0
+    private var osdProgram = 0
+    private var osdTexId = 0
+    private var osdUploaded: Bitmap? = null
+    private var osdTexW = 0
+    private var osdTexH = 0
     private val texMatrix = FloatArray(16)
     private val startTimeNanos = System.nanoTime()
 
-    private val pendingPhoto = AtomicReference<((Bitmap) -> Unit)?>(null)
+    /** Timestamp OSD, baked into preview, video AND photos. MainActivity
+     *  pushes a fresh bitmap ~2x/sec; GL thread uploads on change. */
+    val osdBitmap = AtomicReference<Bitmap?>(null)
+
+    private val osdQuadData = floatArrayOf(
+        // x, y, u, v  (v flipped: GL tex origin is bottom-left, bitmap top-left)
+        0f, 0f, 0f, 1f,
+        1f, 0f, 1f, 1f,
+        0f, 1f, 0f, 0f,
+        1f, 1f, 1f, 0f
+    )
+    private val osdQuadBuffer: FloatBuffer =
+        ByteBuffer.allocateDirect(osdQuadData.size * 4)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+            .put(osdQuadData).apply { position(0) }
 
     private val quadData = floatArrayOf(
         -1f, -1f, 0f, 0f,
@@ -135,68 +153,69 @@ class VhsEffectProcessor : SurfaceProcessor {
             val size = output.size
             GLES20.glViewport(0, 0, size.width, size.height)
             drawFrame()
+            drawOsd(size.width, size.height)
             EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, timestamp)
             EGL14.eglSwapBuffers(eglDisplay, eglSurface)
         }
-
-        // Pending photo grab: render the filtered frame to an FBO and read back
-        pendingPhoto.getAndSet(null)?.let { callback ->
-            val bitmap = captureFilteredFrame()
-            if (bitmap != null) mainHandler.post { callback(bitmap) }
-        }
     }
 
-    private fun captureFilteredFrame(): Bitmap? {
-        val size = inputSize ?: return null
-        val w = size.width
-        val h = size.height
-
-        val fbo = IntArray(1)
-        val tex = IntArray(1)
-        GLES20.glGenFramebuffers(1, fbo, 0)
-        GLES20.glGenTextures(1, tex, 0)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex[0])
-        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0,
-            GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fbo[0])
-        GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0,
-            GLES20.GL_TEXTURE_2D, tex[0], 0)
-        if (GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) != GLES30.GL_FRAMEBUFFER_COMPLETE) {
-            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-            GLES20.glDeleteFramebuffers(1, fbo, 0)
-            GLES20.glDeleteTextures(1, tex, 0)
-            return null
+    /** Alpha-blend the timestamp OSD quad into the bottom-left corner. */
+    private fun drawOsd(viewW: Int, viewH: Int) {
+        val bmp = osdBitmap.get() ?: return
+        if (osdTexId == 0) {
+            val tex = IntArray(1)
+            GLES20.glGenTextures(1, tex, 0)
+            osdTexId = tex[0]
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, osdTexId)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
         }
+        if (bmp !== osdUploaded && !bmp.isRecycled) {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, osdTexId)
+            android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
+            osdUploaded?.let { old -> if (!old.isRecycled) old.recycle() }
+            osdUploaded = bmp
+            osdTexW = bmp.width
+            osdTexH = bmp.height
+        }
+        if (osdTexW == 0) return
 
-        EGL14.eglMakeCurrent(eglDisplay, eglTempSurface, eglTempSurface, eglContext)
-        GLES20.glViewport(0, 0, w, h)
-        drawFrame()
+        // Bottom-left, ~52% of viewport width, aspect preserved
+        val drawW = viewW * 0.52f
+        val drawH = drawW * osdTexH / osdTexW
+        val x0 = -1f + 0.03f * 2f
+        val y0 = -1f + 0.05f * 2f
+        val x1 = x0 + 2f * drawW / viewW
+        val y1 = y0 + 2f * drawH / viewH
 
-        val buf = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder())
-        GLES20.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf)
-        buf.rewind()
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        GLES20.glUseProgram(osdProgram)
 
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-        GLES20.glDeleteFramebuffers(1, fbo, 0)
-        GLES20.glDeleteTextures(1, tex, 0)
+        val posLoc = GLES20.glGetAttribLocation(osdProgram, "aPosition")
+        val uvLoc = GLES20.glGetAttribLocation(osdProgram, "aUV")
+        val scaleLoc = GLES20.glGetUniformLocation(osdProgram, "uScale")
+        val offLoc = GLES20.glGetUniformLocation(osdProgram, "uOffset")
+        GLES20.glUniform2f(scaleLoc, (x1 - x0) / 2f, (y1 - y0) / 2f)
+        GLES20.glUniform2f(offLoc, (x0 + x1) / 2f, (y0 + y1) / 2f)
 
-        val raw = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        raw.copyPixelsFromBuffer(buf)
+        osdQuadBuffer.position(0)
+        GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 16, osdQuadBuffer)
+        GLES20.glEnableVertexAttribArray(posLoc)
+        osdQuadBuffer.position(2)
+        GLES20.glVertexAttribPointer(uvLoc, 2, GLES20.GL_FLOAT, false, 16, osdQuadBuffer)
+        GLES20.glEnableVertexAttribArray(uvLoc)
 
-        // Shader already renders the frame upright: only the GL readback
-        // vertical flip is needed (no extra rotation).
-        val matrix = android.graphics.Matrix()
-        matrix.postScale(1f, -1f)
-        val upright = Bitmap.createBitmap(raw, 0, 0, w, h, matrix, true)
-        if (upright != raw) raw.recycle()
-        return upright
-    }
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, osdTexId)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(osdProgram, "uTexture"), 0)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
-    /** Grab the next filtered frame (upright, shader baked in). */
-    fun takePhoto(callback: (Bitmap) -> Unit) {
-        pendingPhoto.set(callback)
+        GLES20.glDisableVertexAttribArray(posLoc)
+        GLES20.glDisableVertexAttribArray(uvLoc)
+        GLES20.glDisable(GLES20.GL_BLEND)
     }
 
     private fun drawFrame() {
@@ -266,6 +285,7 @@ class VhsEffectProcessor : SurfaceProcessor {
         EGL14.eglMakeCurrent(eglDisplay, eglTempSurface, eglTempSurface, eglContext)
 
         program = buildProgram(VERTEX_SHADER, FRAGMENT_SHADER)
+        osdProgram = buildProgram(OSD_VERTEX_SHADER, OSD_FRAGMENT_SHADER)
         eglReady = true
     }
 
@@ -352,6 +372,27 @@ class VhsEffectProcessor : SurfaceProcessor {
     companion object {
         private const val TAG = "VhsEffectProcessor"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
+
+        private const val OSD_VERTEX_SHADER = """
+            attribute vec2 aPosition;
+            attribute vec2 aUV;
+            uniform vec2 uScale;
+            uniform vec2 uOffset;
+            varying vec2 vUV;
+            void main() {
+                gl_Position = vec4(aPosition * uScale + uOffset, 0.0, 1.0);
+                vUV = aUV;
+            }
+        """
+
+        private const val OSD_FRAGMENT_SHADER = """
+            precision mediump float;
+            uniform sampler2D uTexture;
+            varying vec2 vUV;
+            void main() {
+                gl_FragColor = texture2D(uTexture, vUV);
+            }
+        """
 
         private const val VERTEX_SHADER = """
             attribute vec4 aPosition;

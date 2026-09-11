@@ -11,13 +11,18 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import android.view.MotionEvent
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraEffect
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -34,6 +39,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
@@ -42,12 +48,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvRecElapsed: TextView
     private lateinit var btnPhoto: Button
     private lateinit var btnRecord: Button
+    private lateinit var btnSwitch: Button
 
     private val effectExecutor = Executors.newSingleThreadExecutor()
     private val processor = VhsEffectProcessor()
+    private var camera: Camera? = null
     private var preview: Preview? = null
     private var videoCapture: VideoCapture<Recorder>? = null
+    private var imageCapture: ImageCapture? = null
     private var activeRecording: Recording? = null
+    private var lensFacing = CameraSelector.LENS_FACING_BACK
 
     private val orientationListener by lazy {
         object : android.view.OrientationEventListener(this) {
@@ -55,23 +65,44 @@ class MainActivity : AppCompatActivity() {
                 val rotation = previewView.display?.rotation ?: return
                 preview?.targetRotation = rotation
                 videoCapture?.targetRotation = rotation
+                imageCapture?.targetRotation = rotation
             }
         }
     }
 
     private val osdHandler = Handler(Looper.getMainLooper())
-    private val dateFormat = SimpleDateFormat("MMM dd yyyy\nhh:mm:ss a", Locale.US)
+    private val dateFormat = SimpleDateFormat("MMM dd yyyy  hh:mm:ss a", Locale.US)
     private val fileStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
     private var startMillis = System.currentTimeMillis()
 
     private val osdTicker = object : Runnable {
         override fun run() {
             val elapsed = (System.currentTimeMillis() - startMillis) / 1000
-            osdTimestamp.text = "PLAY \u25B6  SP %d:%02d:%02d\n%s"
-                .format(elapsed / 3600, (elapsed % 3600) / 60, elapsed % 60,
-                    dateFormat.format(Date()))
+            val line1 = "PLAY \u25B6  SP %d:%02d:%02d"
+                .format(elapsed / 3600, (elapsed % 3600) / 60, elapsed % 60)
+            val line2 = dateFormat.format(Date())
+            osdTimestamp.text = "$line1\n$line2"
+            processor.osdBitmap.set(buildOsdBitmap(line1, line2))
             osdHandler.postDelayed(this, 500)
         }
+    }
+
+    /** Transparent bitmap carrying the two OSD lines; uploaded to GL by the
+     *  effect processor so the stamp is baked into preview, video, photos. */
+    private fun buildOsdBitmap(line1: String, line2: String): Bitmap {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFFF5F5F5.toInt()
+            textSize = 46f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setShadowLayer(8f, 0f, 0f, 0xFFFFFFFF.toInt())
+        }
+        val w = (maxOf(paint.measureText(line1), paint.measureText(line2)) + 24).toInt()
+        val h = (46f * 2 * 1.35f + 24).toInt()
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawText(line1, 12f, 12f + 46f, paint)
+        canvas.drawText(line2, 12f, 12f + 46f + 46f * 1.35f, paint)
+        return bmp
     }
 
     private val permissionsLauncher =
@@ -89,9 +120,24 @@ class MainActivity : AppCompatActivity() {
         tvRecElapsed = findViewById(R.id.tvRecElapsed)
         btnPhoto = findViewById(R.id.btnPhoto)
         btnRecord = findViewById(R.id.btnRecord)
+        btnSwitch = findViewById(R.id.btnSwitch)
 
         btnPhoto.setOnClickListener { takePhoto() }
         btnRecord.setOnClickListener { toggleRecording() }
+        btnSwitch.setOnClickListener { switchCamera() }
+
+        // Tap to focus/meter at the touched point
+        previewView.setOnTouchListener { _, event ->
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                val point = previewView.meteringPointFactory.createPoint(event.x, event.y)
+                val action = FocusMeteringAction.Builder(
+                    point,
+                    FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+                ).setAutoCancelDuration(3, TimeUnit.SECONDS).build()
+                camera?.cameraControl?.startFocusAndMetering(action)
+            }
+            true
+        }
 
         val needed = mutableListOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT <= 28) needed.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
@@ -127,62 +173,48 @@ class MainActivity : AppCompatActivity() {
                 .build()
             this.videoCapture = videoCapture
 
+            val imageCapture = ImageCapture.Builder()
+                .setTargetRotation(displayRotation)
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                .build()
+            this.imageCapture = imageCapture
+
             val effect = VhsEffect(
-                CameraEffect.PREVIEW or CameraEffect.VIDEO_CAPTURE,
+                CameraEffect.PREVIEW or CameraEffect.VIDEO_CAPTURE
+                    or CameraEffect.IMAGE_CAPTURE,
                 effectExecutor, processor)
 
             val useCaseGroup = UseCaseGroup.Builder()
                 .addUseCase(preview)
                 .addUseCase(videoCapture)
+                .addUseCase(imageCapture)
                 .addEffect(effect)
                 .build()
 
+            val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
             try {
                 provider.unbindAll()
-                provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, useCaseGroup)
+                camera = provider.bindToLifecycle(this, selector, useCaseGroup)
             } catch (e: Exception) {
                 Toast.makeText(this, "Camera bind failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }, ContextCompat.getMainExecutor(this))
     }
 
-    // ---- Photo capture (filtered frame) ----
+    private fun switchCamera() {
+        activeRecording?.stop()
+        activeRecording = null
+        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK)
+            CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+        startCamera()
+    }
+
+    // ---- Photo capture: full-res JPEG through the effect (shader + OSD baked) ----
 
     private fun takePhoto() {
+        val ic = imageCapture ?: return
         btnPhoto.isEnabled = false
-        processor.takePhoto { bitmap ->
-            runOnUiThread { btnPhoto.isEnabled = true }
-            val stamped = drawOsdOn(bitmap)
-            savePhoto(stamped)
-        }
-    }
 
-    private fun drawOsdOn(bitmap: Bitmap): Bitmap {
-        val out = bitmap.copy(Bitmap.Config.ARGB_8888, true)
-        val canvas = Canvas(out)
-        val textSize = out.width / 22f
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFFF5F5F5.toInt()
-            this.textSize = textSize
-            typeface = android.graphics.Typeface.MONOSPACE
-            setShadowLayer(textSize / 6f, 0f, 0f, 0xFFFFFFFF.toInt())
-        }
-        val elapsed = (System.currentTimeMillis() - startMillis) / 1000
-        val lines = listOf(
-            "PLAY \u25B6  SP %d:%02d:%02d".format(elapsed / 3600, (elapsed % 3600) / 60, elapsed % 60),
-            dateFormat.format(Date())
-        )
-        val margin = out.width / 18f
-        var y = out.height - margin - textSize * (lines.size - 1) * 1.2f
-        for (line in lines) {
-            canvas.drawText(line, margin, y, paint)
-            y += textSize * 1.2f
-        }
-        if (out != bitmap) bitmap.recycle()
-        return out
-    }
-
-    private fun savePhoto(bitmap: Bitmap) {
         val name = "VHS_${fileStamp.format(Date())}.jpg"
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
@@ -191,21 +223,25 @@ class MainActivity : AppCompatActivity() {
                 put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/VhsCam")
             }
         }
-        val uri = contentResolver.insert(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-        val ok = uri?.let {
-            contentResolver.openOutputStream(it)?.use { stream ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 92, stream)
-            } == true
-        } == true
-        bitmap.recycle()
-        runOnUiThread {
-            Toast.makeText(this,
-                if (ok) "Saved $name" else "Photo save failed", Toast.LENGTH_SHORT).show()
-        }
+        val outputOptions = ImageCapture.OutputFileOptions
+            .Builder(contentResolver, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            .build()
+
+        ic.takePicture(outputOptions, ContextCompat.getMainExecutor(this),
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                    btnPhoto.isEnabled = true
+                    Toast.makeText(this@MainActivity, "Saved $name", Toast.LENGTH_SHORT).show()
+                }
+                override fun onError(exception: ImageCaptureException) {
+                    btnPhoto.isEnabled = true
+                    Toast.makeText(this@MainActivity,
+                        "Photo failed: ${exception.message}", Toast.LENGTH_LONG).show()
+                }
+            })
     }
 
-    // ---- Video recording (effect in pipeline) ----
+    // ---- Video recording (effect + OSD in pipeline) ----
 
     private fun toggleRecording() {
         activeRecording?.let {
