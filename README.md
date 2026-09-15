@@ -46,4 +46,4 @@ JAVA_HOME=/usr/lib/jvm/java-17-openjdk ANDROID_HOME=~/Android/Sdk ./gradlew asse
 - Back camera only; front-camera mirroring not handled
 - Verified on Pixel 8a (Android 16)
 
-Made by synth with synthclaw 🎹🦞
+Made by synth with blackclaw ⚫🦞
