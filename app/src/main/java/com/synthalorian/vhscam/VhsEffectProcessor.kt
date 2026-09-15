@@ -1,4 +1,4 @@
-package com.synth.vhscam
+package com.synthalorian.vhscam
 
 import android.graphics.Bitmap
 import android.graphics.SurfaceTexture

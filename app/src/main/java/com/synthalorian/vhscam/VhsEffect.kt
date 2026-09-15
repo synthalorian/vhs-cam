@@ -1,4 +1,4 @@
-package com.synth.vhscam
+package com.synthalorian.vhscam
 
 import android.util.Log
 import androidx.camera.core.CameraEffect

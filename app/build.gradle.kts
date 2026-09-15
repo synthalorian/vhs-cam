@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.synth.vhscam"
+    namespace = "com.synthalorian.vhscam"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.synth.vhscam"
+        applicationId = "com.synthalorian.vhscam"
         minSdk = 26
         targetSdk = 36
         versionCode = 3
