@@ -1,3 +1,5 @@
+![vhs-cam](.github/preview.png)
+
 # VHS Cam (spike)
 
 Retro VHS camcorder app — feasibility spike for a CameraX + OpenGL fragment-shader
