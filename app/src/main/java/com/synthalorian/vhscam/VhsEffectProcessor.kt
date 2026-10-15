@@ -96,8 +96,7 @@ class VhsEffectProcessor : SurfaceProcessor {
     override fun onInputSurface(request: SurfaceRequest) {
         request.setTransformationInfoListener(glExecutor) { info ->
             if (info.rotationDegrees != rotationDegrees) {
-                Log.d(TAG, "rotationDegrees: $rotationDegrees -> ${info.rotationDegrees}, " +
-                    "targetRotation=${info.targetRotation}, mirroring=${info.isMirroring}")
+                Log.d(TAG, "rotationDegrees: $rotationDegrees -> ${info.rotationDegrees}")
             }
             rotationDegrees = info.rotationDegrees
         }
